@@ -2,3 +2,4 @@
 __pycache__/
 *Zone.Identifier
 maps/*/drivable.npy
+*.egg-info/

@@ -20,6 +20,8 @@ Stored in config/landmarks_cm2.json:
 
 Commands
     add <name> "<Label>"   save the spot under the spectator camera
+        --at X Y             ...or use a known map point instead
+        --force              allow overwriting an existing name (refused otherwise)
     list                   print all landmarks
     remove <name>          delete one
     show [--seconds N]     draw all landmark labels inside the CARLA window
@@ -91,10 +93,19 @@ def routable_candidates(cmap):
 def cmd_add(args):
     if not re.fullmatch(r"[a-z0-9_]+", args.name):
         raise SystemExit("name must be lowercase letters, digits, underscores (e.g. tech_park)")
+    db = load_db()
+    if args.name in db["landmarks"] and not args.force:
+        old = db["landmarks"][args.name]["label"]
+        raise SystemExit(f"'{args.name}' already exists (label '{old}'). "
+                         "Pick a new name, or add --force to overwrite it.")
     world = connect(args)
     cmap = world.get_map()
-    cam = world.get_spectator().get_transform().location
-    print(f"Spectator at x={cam.x:.1f} y={cam.y:.1f} z={cam.z:.1f}")
+    if args.at:
+        cam = carla.Location(x=args.at[0], y=args.at[1], z=0.0)
+        print(f"Using given point x={cam.x:.1f} y={cam.y:.1f}")
+    else:
+        cam = world.get_spectator().get_transform().location
+        print(f"Spectator at x={cam.x:.1f} y={cam.y:.1f} z={cam.z:.1f}")
 
     # nearest routable waypoint in 2D (the camera is high above the road,
     # so we ignore height on purpose)
@@ -109,9 +120,8 @@ def cmd_add(args):
         print(f"WARNING: nearest routable lane is {dist:.0f} m away. "
               "Fly closer to the road in front of the landmark and re-run.")
 
-    db = load_db()
     if args.name in db["landmarks"]:
-        print(f"(overwriting existing '{args.name}')")
+        print(f"(overwriting existing '{args.name}' because of --force)")
     db["landmarks"][args.name] = {
         "label": args.label,
         "x": round(t.location.x, 2), "y": round(t.location.y, 2),
@@ -204,6 +214,10 @@ def main():
     a = sub.add_parser("add")
     a.add_argument("name")
     a.add_argument("label")
+    a.add_argument("--at", nargs=2, type=float, metavar=("X", "Y"),
+                   help="use this map point instead of the spectator position")
+    a.add_argument("--force", action="store_true",
+                   help="overwrite an existing landmark with the same name")
     a.set_defaults(func=cmd_add)
 
     sub.add_parser("list").set_defaults(func=cmd_list)

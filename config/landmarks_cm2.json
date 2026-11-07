@@ -1,6 +1,105 @@
 {
   "map": "cm2",
   "landmarks": {
+    "arch_gate": {
+      "label": "Arch Gate",
+      "x": -402.51,
+      "y": -76.18,
+      "z": 0.0,
+      "yaw": 184.5,
+      "road_id": 12,
+      "lane_id": 4,
+      "snap_dist_m": 0.9,
+      "added": "2026-11-07 18:26:09"
+    },
+    "bel_lab": {
+      "label": "BEL Lab",
+      "x": -151.2,
+      "y": -68.76,
+      "z": 0.0,
+      "yaw": 179.8,
+      "road_id": 87,
+      "lane_id": 5,
+      "snap_dist_m": 4.0,
+      "added": "2026-11-07 18:22:38"
+    },
+    "biotech_block": {
+      "label": "Biotech Block",
+      "x": -103.45,
+      "y": -231.19,
+      "z": 0.0,
+      "yaw": 179.9,
+      "road_id": 3,
+      "lane_id": -1,
+      "snap_dist_m": 0.7,
+      "added": "2026-11-07 18:22:36"
+    },
+    "classroom_complex": {
+      "label": "Classroom Complex",
+      "x": -777.5,
+      "y": 220.11,
+      "z": 0.0,
+      "yaw": 18.5,
+      "road_id": 66,
+      "lane_id": -1,
+      "snap_dist_m": 1.3,
+      "added": "2026-11-07 18:22:46"
+    },
+    "electrical_sciences_block": {
+      "label": "Electrical Sciences Block",
+      "x": -706.66,
+      "y": 243.43,
+      "z": 0.0,
+      "yaw": 19.1,
+      "road_id": 79,
+      "lane_id": -1,
+      "snap_dist_m": 9.7,
+      "added": "2026-11-07 18:22:44"
+    },
+    "hitech_block": {
+      "label": "Hi-Tech Block",
+      "x": -675.71,
+      "y": 172.18,
+      "z": 0.0,
+      "yaw": 199.6,
+      "road_id": 65,
+      "lane_id": 1,
+      "snap_dist_m": 1.3,
+      "added": "2026-11-07 18:22:42"
+    },
+    "hostel_block": {
+      "label": "Hostel Block",
+      "x": -22.4,
+      "y": 70.74,
+      "z": 0.0,
+      "yaw": 269.2,
+      "road_id": 52,
+      "lane_id": 1,
+      "snap_dist_m": 1.1,
+      "added": "2026-11-07 18:25:23"
+    },
+    "main_gate": {
+      "label": "Main Gate",
+      "x": -763.8,
+      "y": 144.57,
+      "z": 0.0,
+      "yaw": 19.6,
+      "road_id": 64,
+      "lane_id": -1,
+      "snap_dist_m": 0.2,
+      "added": "2026-11-07 18:22:48"
+    },
+    "medical_college": {
+      "label": "SRM Medical College",
+      "x": 283.48,
+      "y": -63.96,
+      "z": 0.15,
+      "yaw": 270.6,
+      "road_id": 59,
+      "lane_id": 1,
+      "snap_dist_m": 7.4,
+      "added": "2026-11-07 18:24:15"
+    },
     "tech_park": {
       "label": "Tech Park",
       "x": 22.91,
@@ -11,6 +110,28 @@
       "lane_id": -1,
       "snap_dist_m": 2.0,
       "added": "2026-11-07 18:09:43"
+    },
+    "tp_ganesan_auditorium": {
+      "label": "TP Ganesan Auditorium",
+      "x": 180.69,
+      "y": -227.39,
+      "z": 0.0,
+      "yaw": -178.9,
+      "road_id": 77,
+      "lane_id": -1,
+      "snap_dist_m": 0.4,
+      "added": "2026-11-07 18:26:43"
+    },
+    "university_building": {
+      "label": "University Building",
+      "x": -304.54,
+      "y": -71.95,
+      "z": 0.0,
+      "yaw": 184.5,
+      "road_id": 12,
+      "lane_id": 5,
+      "snap_dist_m": 0.3,
+      "added": "2026-11-07 18:22:40"
     }
   }
 }

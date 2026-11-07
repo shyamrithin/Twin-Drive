@@ -16,7 +16,7 @@ Work in progress, built phase by phase.
 
 | Phase | Scope | Status |
 |---|---|---|
-| 0 | Map audit, road graph, drivable-area mask, campus landmarks | in progress |
+| 0 | Map audit, road graph, drivable-area mask, campus landmarks | done |
 | 1 | Ego sensors (3D LiDAR, cameras), ROS 2 visualisation, route following | planned |
 | 2 | Campus traffic module (two-wheelers, crowds, parked vehicles) | planned |
 | 3 | LiDAR + camera bird's-eye-view perception | planned |
