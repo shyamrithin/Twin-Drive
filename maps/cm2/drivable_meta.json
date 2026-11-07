@@ -1,0 +1,17 @@
+{
+  "map": "Carla/Maps/cm2/cm2",
+  "server_version": "c22212001-dirty",
+  "resolution_m": 0.5,
+  "origin_x": -988.1818237304688,
+  "origin_y": -875.3881225585938,
+  "width_px": 3449,
+  "height_px": 2730,
+  "pixel_convention": "col=(x-origin_x)/res, row=(y-origin_y)/res",
+  "classes": {
+    "0": "offroad",
+    "1": "soft_drivable",
+    "2": "lane_not_routable",
+    "3": "lane_routable"
+  },
+  "generated": "2026-11-07 17:59:38"
+}

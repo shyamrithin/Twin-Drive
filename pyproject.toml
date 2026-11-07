@@ -1,0 +1,22 @@
+# =============================================================================
+# File        : pyproject.toml
+# Project     : TwinDrive — Lane-Free Autonomous Driving on a Digital Twin
+#               of an Indian Campus (SRM Town / cm2, CARLA 0.9.16)
+# Purpose     : Makes `twindrive` an installable Python package so every tool,
+#               training script and ROS node can simply `import twindrive`.
+# Install     : pip install -e .     (editable: code changes apply instantly)
+# =============================================================================
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "twindrive"
+version = "0.0.1"
+description = "Lane-free autonomous driving on a CARLA digital twin of SRMIST Kattankulathur"
+requires-python = ">=3.10"
+dependencies = ["carla==0.9.16", "numpy", "matplotlib", "pillow"]
+
+[tool.setuptools.packages.find]
+include = ["twindrive*"]
