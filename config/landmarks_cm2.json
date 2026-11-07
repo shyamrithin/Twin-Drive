@@ -1,0 +1,16 @@
+{
+  "map": "cm2",
+  "landmarks": {
+    "tech_park": {
+      "label": "Tech Park",
+      "x": 22.91,
+      "y": -230.15,
+      "z": 0.0,
+      "yaw": -179.4,
+      "road_id": 78,
+      "lane_id": -1,
+      "snap_dist_m": 2.0,
+      "added": "2026-11-07 18:09:43"
+    }
+  }
+}
