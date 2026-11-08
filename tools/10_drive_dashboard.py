@@ -3,43 +3,44 @@
 # File        : tools/10_drive_dashboard.py
 # Project     : TwinDrive — Lane-Free Autonomous Driving on a Digital Twin
 #               of an Indian Campus (SRM Town / cm2, CARLA 0.9.16)
-# Phase       : 1 — Ego vehicle, sensor suite and dashboard (step 1)
+# Phase       : 1 — Ego, sensors, dashboard (step 1) + autonomous pilot (step 2)
 # Runs on     : WSL2 Ubuntu 22.04 (client)  ->  Windows CarlaUE4.exe (server)
-# Env         : conda activate twindrive   (+ pip install pygame)
+# Env         : conda activate twindrive
 # =============================================================================
 """
 Description
 -----------
-Spawns the TwinDrive ego car at a campus landmark, attaches the sensor suite
+Spawns the TwinDrive ego car at a campus landmark with its sensor suite
 (front camera, 32-channel 3D LiDAR, IMU, collision), fills campus with
-background traffic, and shows everything live on a pygame dashboard:
+background traffic, and shows everything on the pygame dashboard.
 
-    front camera with ground-truth vehicle boxes   3D LiDAR chase view
-    heading-up BEV map (drivable area + obstacles)  speed gauge, steering
-    wheel, pedals, gear                             lead vehicle gap / TTC
-    compass + artificial horizon                    g-g acceleration plot
-    speed / steering / pedal history                status bar
+Three driving modes
+    MANUAL        you drive with W/A/S/D
+    TWINDRIVE     our own pilot: plans a route to the goal landmark (Dijkstra
+                  over the lane graph) and follows it (pure pursuit steering,
+                  PI speed control, adaptive cruise behind the lead vehicle,
+                  emergency braking, stop at goal)
+    TM AUTOPILOT  CARLA's built-in Traffic Manager (no destination; reference)
 
-You drive with the keyboard, or press P to hand over to CARLA's Traffic
-Manager autopilot. Our own planner and controller replace the autopilot in
-the next step.
+Keys: T TwinDrive pilot, G next goal, P CARLA autopilot, W/A/S/D take over,
+      Q reverse, SPACE handbrake, H help, ESC quit.
 
 Simulation runs in SYNCHRONOUS mode at a fixed dt: the server only advances
 when this script calls world.tick(), so every sensor reading in a frame
-describes the same instant. Settings are always restored on exit, even after
-a crash; if this script is killed hard (closing the terminal), restart
-CarlaUE4.exe because it will be waiting for a tick that never comes.
+describes the same instant, and the pilot's behaviour does not depend on how
+fast your laptop is. Settings are always restored on exit; if the script is
+killed hard (closing the terminal), restart CarlaUE4.exe.
 
 Lead vehicle: the nearest vehicle ahead whose box overlaps the ego's width,
-using ground-truth positions (a straight corridor, so it can miss cars on
+from ground-truth positions (a straight corridor, so it can miss cars on
 tight curves). Real perception replaces this in Phase 3.
 
 Usage
 -----
-    python tools/10_drive_dashboard.py                       # Main Gate, 30 cars
-    python tools/10_drive_dashboard.py --spawn tech_park --traffic 50
-    python tools/10_drive_dashboard.py --autopilot --scale 0.8
-    python tools/10_drive_dashboard.py --no-camera           # lighter on the GPU
+    python tools/10_drive_dashboard.py --goal tech_park           # drive itself
+    python tools/10_drive_dashboard.py --spawn tech_park --goal main_gate
+    python tools/10_drive_dashboard.py --no-camera --traffic 0    # speed test
+    python tools/10_drive_dashboard.py --scale 0.8                # small screens
 """
 
 import os
@@ -58,6 +59,8 @@ import numpy as np
 import pygame
 
 from twindrive import DEFAULT_MAP
+from twindrive.control import Pilot
+from twindrive.planning import RoutePlanner
 from twindrive.sensors import CAMERA_CFG, SensorSuite
 from twindrive.viz import BEV_CAR_ROW_FRAC, BEV_M_PER_PX, BEV_SIZE, WINDOW_SIZE, Dashboard
 from twindrive.world import (DrivableMap, is_routable, load_landmarks,
@@ -65,9 +68,12 @@ from twindrive.world import (DrivableMap, is_routable, load_landmarks,
 
 NEAR_M = 60.0          # vehicles closer than this are drawn and considered
 LANDMARK_VIEW_M = 120.0
+REPLAN_OFF_ROUTE_M = 10.0
 # 8 box corners, index = sx*4 + sy*2 + sz  (matches twindrive.viz.dashboard)
 CORNER_SIGNS = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)],
                         dtype=np.float64)
+DRIVE_KEYS = (pygame.K_w, pygame.K_s, pygame.K_a, pygame.K_d,
+              pygame.K_UP, pygame.K_DOWN, pygame.K_LEFT, pygame.K_RIGHT)
 
 
 # ============================================================================ keyboard
@@ -79,7 +85,7 @@ class KeyboardDriver:
         self.throttle = 0.0
         self.brake = 0.0
         self.reverse = False
-        self.autopilot = False
+        self.parked = False  # handbrake held after the pilot arrives
 
     def control(self, keys, ms):
         c = carla.VehicleControl()
@@ -87,6 +93,8 @@ class KeyboardDriver:
         down = keys[pygame.K_s] or keys[pygame.K_DOWN]
         left = keys[pygame.K_a] or keys[pygame.K_LEFT]
         right = keys[pygame.K_d] or keys[pygame.K_RIGHT]
+        if up or down or left or right:
+            self.parked = False
 
         self.throttle = min(1.0, self.throttle + 0.002 * ms) if up else 0.0
         self.brake = min(1.0, self.brake + 0.006 * ms) if down else 0.0
@@ -100,7 +108,7 @@ class KeyboardDriver:
         self.steer = float(np.clip(self.steer, -0.7, 0.7))
 
         c.throttle, c.brake, c.steer = self.throttle, self.brake, self.steer
-        c.hand_brake = bool(keys[pygame.K_SPACE])
+        c.hand_brake = bool(keys[pygame.K_SPACE]) or self.parked
         c.reverse = self.reverse
         return c
 
@@ -167,6 +175,20 @@ def spawn_traffic(client, world, cmap, tm, n, bike_frac, ego_loc, rng):
     return ids
 
 
+def vehicle_geometry(ego):
+    """Wheelbase (m) and max front-wheel steer angle (deg) from CARLA physics."""
+    try:
+        wheels = ego.get_physics_control().wheels
+        max_steer = wheels[0].max_steer_angle
+        front, rear = wheels[0].position, wheels[2].position  # centimetres
+        wheelbase = math.dist((front.x, front.y, front.z), (rear.x, rear.y, rear.z)) / 100.0
+        if not 1.5 < wheelbase < 5.0:
+            wheelbase = 2.9
+        return wheelbase, max_steer
+    except (RuntimeError, IndexError, AttributeError):
+        return 2.9, 70.0
+
+
 # ============================================================================ per-frame state
 def box_corners_in_ego(actor, ego_inv):
     bb = actor.bounding_box
@@ -177,7 +199,7 @@ def box_corners_in_ego(actor, ego_inv):
     return (world_pts @ ego_inv.T)[:, :3]
 
 
-def build_state(ego, others, data, imu_f, landmarks, dm, sim_time, status):
+def build_state(ego, others, data, imu_f, landmarks, dm, status):
     tf = ego.get_transform()
     ex, ey, yaw = tf.location.x, tf.location.y, tf.rotation.yaw
     v = ego.get_velocity()
@@ -232,7 +254,7 @@ def build_state(ego, others, data, imu_f, landmarks, dm, sim_time, status):
         "camera": data.get("camera"),
         "lidar": data.get("lidar"),
         "bev": dm.render_local(ex, ey, yaw, BEV_SIZE, BEV_M_PER_PX, BEV_CAR_ROW_FRAC) if dm else None,
-        "ego": {"speed_kmh": speed * 3.6, "x": ex, "y": ey, "yaw": yaw,
+        "ego": {"speed_kmh": speed * 3.6, "speed_ms": speed, "x": ex, "y": ey, "yaw": yaw,
                 "pitch": tf.rotation.pitch, "roll": tf.rotation.roll,
                 "length": 2 * ebb.x, "width": 2 * ebb.y, "height": 2 * ebb.z},
         "control": {"throttle": ctl.throttle, "brake": ctl.brake, "steer": ctl.steer,
@@ -249,18 +271,20 @@ def build_state(ego, others, data, imu_f, landmarks, dm, sim_time, status):
 
 # ============================================================================ main
 def main():
-    p = argparse.ArgumentParser(description="TwinDrive Phase 1: drive with the dashboard")
+    p = argparse.ArgumentParser(description="TwinDrive Phase 1: dashboard + autonomous pilot")
     p.add_argument("--host", default="localhost")
     p.add_argument("--port", type=int, default=2000)
     p.add_argument("--tm-port", type=int, default=8000)
     p.add_argument("--spawn", default="main_gate", help="landmark name to start at")
+    p.add_argument("--goal", default=None, help="landmark to drive to (starts the pilot)")
+    p.add_argument("--cruise", type=float, default=25.0, help="pilot cruise speed, km/h")
     p.add_argument("--vehicle", default="vehicle.tesla.model3")
     p.add_argument("--traffic", type=int, default=30)
     p.add_argument("--bikes", type=float, default=0.35, help="fraction of traffic that is two-wheelers")
     p.add_argument("--dt", type=float, default=0.05, help="simulation step (s)")
     p.add_argument("--lidar-pps", type=int, default=300000)
     p.add_argument("--no-camera", action="store_true")
-    p.add_argument("--autopilot", action="store_true", help="start in autopilot")
+    p.add_argument("--autopilot", action="store_true", help="start in CARLA's TM autopilot")
     p.add_argument("--no-follow", action="store_true", help="don't move the CARLA spectator")
     p.add_argument("--scale", type=float, default=1.0, help="window scale, e.g. 0.8 for small screens")
     p.add_argument("--seed", type=int, default=7)
@@ -275,11 +299,16 @@ def main():
         raise SystemExit(f"Loaded map is {cmap.name}; load '{DEFAULT_MAP}' first.")
 
     landmarks = load_landmarks()
+    if args.goal and args.goal not in landmarks:
+        raise SystemExit(f"Unknown goal '{args.goal}'. Known: {', '.join(sorted(landmarks))}")
+    goal_names = sorted(n for n in landmarks if n != args.spawn)
     map_dir = Path(f"maps/{DEFAULT_MAP}")
     dm = DrivableMap(map_dir) if (map_dir / "drivable.npy").exists() else None
     if dm is None:
         print("NOTE: maps/cm2/drivable.npy missing, BEV map will be blank. "
               "Run tools/02_build_drivable_mask.py to create it.")
+    print("Building route planner ...")
+    planner = RoutePlanner(cmap)
 
     original = world.get_settings()
     tm = client.get_trafficmanager(args.tm_port)
@@ -303,6 +332,31 @@ def main():
         suite = SensorSuite(world, ego, args.dt, args.lidar_pps, camera=not args.no_camera)
         world.tick()
         others = [a for a in world.get_actors().filter("vehicle.*") if a.id != ego.id]
+        wheelbase, max_steer = vehicle_geometry(ego)
+        print(f"Ego geometry: wheelbase {wheelbase:.2f} m, max steer {max_steer:.0f} deg")
+
+        # ---------------------------------------------------- pilot
+        pilot, goal = None, None
+
+        def plan_to(name):
+            nonlocal pilot, goal
+            lm = landmarks[name]
+            route = planner.plan(ego.get_location(), carla.Location(lm["x"], lm["y"], lm["z"]))
+            length = float(np.hypot(*np.diff(route[:, :2], axis=0).T).sum())
+            if pilot is None:
+                pilot = Pilot(route, wheelbase, max_steer, args.cruise, args.dt)
+            else:
+                pilot.set_route(route)
+            goal = name
+            print(f"Route to {lm['label']}: {length:.0f} m, {len(route)} points")
+
+        mode = "MANUAL"
+        if args.goal:
+            plan_to(args.goal)
+            mode = "TWINDRIVE"
+        elif args.autopilot:
+            mode = "TM AUTOPILOT"
+            ego.set_autopilot(True, args.tm_port)
 
         # ---------------------------------------------------- pygame
         pygame.display.init()
@@ -313,14 +367,19 @@ def main():
         canvas = window if args.scale == 1.0 else pygame.Surface(WINDOW_SIZE)
         dash = Dashboard(canvas)
         clock = pygame.time.Clock()
-
         driver = KeyboardDriver()
-        driver.autopilot = args.autopilot
-        ego.set_autopilot(driver.autopilot, args.tm_port)
         spectator = world.get_spectator()
         imu_f = None
-        fps_hist, last_wall = [], time.time()
-        frame_count = 0
+        walls, last_wall = [], time.time()
+        frame_count, render_ms = 0, 0.0
+
+        def set_mode(new):
+            nonlocal mode
+            if new == mode:
+                return
+            ego.set_autopilot(new == "TM AUTOPILOT", args.tm_port)
+            mode = new
+            print(f"Mode: {mode}")
 
         running = True
         while running:
@@ -333,27 +392,43 @@ def main():
                     if ev.key == pygame.K_ESCAPE:
                         running = False
                     elif ev.key == pygame.K_p:
-                        driver.autopilot = not driver.autopilot
-                        ego.set_autopilot(driver.autopilot, args.tm_port)
+                        set_mode("MANUAL" if mode == "TM AUTOPILOT" else "TM AUTOPILOT")
+                    elif ev.key == pygame.K_t:
+                        if mode == "TWINDRIVE":
+                            set_mode("MANUAL")
+                        else:
+                            try:
+                                plan_to(goal or goal_names[0])
+                                driver.parked = False
+                                set_mode("TWINDRIVE")
+                            except RuntimeError as e:
+                                print(f"Planning failed: {e}")
+                    elif ev.key == pygame.K_g and goal_names:
+                        nxt = goal_names[(goal_names.index(goal) + 1) % len(goal_names)] \
+                            if goal in goal_names else goal_names[0]
+                        try:
+                            plan_to(nxt)
+                        except RuntimeError as e:
+                            print(f"Planning to {nxt} failed: {e}")
                     elif ev.key == pygame.K_q:
                         driver.reverse = not driver.reverse
                     elif ev.key == pygame.K_h:
                         dash.show_help = not dash.show_help
-            if not driver.autopilot:
-                ego.apply_control(driver.control(pygame.key.get_pressed(), ms))
+                    elif ev.key in DRIVE_KEYS and mode != "MANUAL":
+                        set_mode("MANUAL")  # driver takes over, like a real car
 
             # ------------------------------------------------ step the world
+            t0 = time.time()
             frame = world.tick()
             try:
                 data = suite.get(frame)
             except queue.Empty:
                 print("WARNING: sensor data timed out for frame", frame)
                 continue
-            snap = world.get_snapshot()
-            sim_time = snap.timestamp.elapsed_seconds
+            tick_ms = (time.time() - t0) * 1000.0
+            sim_time = world.get_snapshot().timestamp.elapsed_seconds
 
-            # low-pass the IMU so collisions/bumps don't make the plot jump
-            if "imu" in data:
+            if "imu" in data:  # low-pass so bumps don't make the plots jump
                 m = data["imu"]
                 if imu_f is None:
                     imu_f = dict(m)
@@ -369,30 +444,61 @@ def main():
             if not args.no_follow:
                 tf = ego.get_transform()
                 f = tf.get_forward_vector()
-                cam_loc = carla.Location(tf.location.x - 9.0 * f.x,
-                                         tf.location.y - 9.0 * f.y,
-                                         tf.location.z + 4.5)
                 spectator.set_transform(carla.Transform(
-                    cam_loc, carla.Rotation(pitch=-18.0, yaw=tf.rotation.yaw)))
+                    carla.Location(tf.location.x - 9.0 * f.x, tf.location.y - 9.0 * f.y,
+                                   tf.location.z + 4.5),
+                    carla.Rotation(pitch=-18.0, yaw=tf.rotation.yaw)))
 
             now = time.time()
-            wall = max(now - last_wall, 1e-3)
+            walls = (walls + [max(now - last_wall, 1e-3)])[-30:]
             last_wall = now
-            fps_hist = (fps_hist + [wall])[-30:]
-            mean_wall = sum(fps_hist) / len(fps_hist)
+            mean_wall = sum(walls) / len(walls)
             coll = None
             if suite.last_collision and sim_time - suite.last_collision[0] < 3.0:
                 coll = suite.last_collision[1]
-            status = {"mode": "AUTOPILOT" if driver.autopilot else "MANUAL",
-                      "sim_time": sim_time, "frame": frame, "rtf": args.dt / mean_wall,
-                      "client_fps": 1.0 / mean_wall, "map": DEFAULT_MAP, "collision": coll}
+            status = {"mode": mode, "sim_time": sim_time, "frame": frame,
+                      "rtf": args.dt / mean_wall, "client_fps": 1.0 / mean_wall,
+                      "map": DEFAULT_MAP, "collision": coll,
+                      "tick_ms": tick_ms, "render_ms": render_ms}
+            state = build_state(ego, others, data, imu_f, landmarks, dm, status)
+            ego_s = state["ego"]
+
+            # ------------------------------------------------ decide next control
+            if mode == "TWINDRIVE" and pilot is not None:
+                out = pilot.step(ego_s["x"], ego_s["y"], ego_s["yaw"], ego_s["speed_ms"],
+                                 state["lead"])
+                ego.apply_control(carla.VehicleControl(
+                    throttle=out["throttle"], brake=out["brake"], steer=out["steer"]))
+                if out["arrived"]:
+                    print(f"Arrived at {landmarks[goal]['label']}.")
+                    driver.parked = True
+                    set_mode("MANUAL")
+                elif out["off_route_m"] > REPLAN_OFF_ROUTE_M:
+                    print("Off route, replanning ...")
+                    try:
+                        plan_to(goal)
+                    except RuntimeError as e:
+                        print(f"Replan failed: {e}")
+                        set_mode("MANUAL")
+                remaining = out["remaining_m"]
+                state["nav"] = {"goal": landmarks[goal]["label"], "remaining_m": remaining,
+                                "eta_s": remaining / max(ego_s["speed_ms"], args.cruise / 3.6 * 0.5),
+                                "target_kmh": out["target_kmh"], "reason": out["reason"]}
+            elif mode == "MANUAL":
+                ego.apply_control(driver.control(pygame.key.get_pressed(), ms))
+
+            if pilot is not None and goal is not None:  # upcoming route, for drawing
+                pts = pilot.route[pilot.idx: pilot.idx + 300: 2]
+                f_, r_ = world_to_local(pts[:, 0], pts[:, 1], ego_s["x"], ego_s["y"], ego_s["yaw"])
+                state["route"] = np.c_[f_, r_]
 
             # ------------------------------------------------ draw
-            state = build_state(ego, others, data, imu_f, landmarks, dm, sim_time, status)
+            t1 = time.time()
             dash.render(state)
             if canvas is not window:
                 pygame.transform.smoothscale(canvas, win_size, window)
             pygame.display.flip()
+            render_ms = (time.time() - t1) * 1000.0
 
     except KeyboardInterrupt:
         pass

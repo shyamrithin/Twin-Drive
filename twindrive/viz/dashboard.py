@@ -38,7 +38,10 @@ State dict (all keys optional except "ego")
              corner index = sx*4 + sy*2 + sz, s* in {0: -extent, 1: +extent}
     lead     None or {gap_m, rel_kmh, ttc_s, speed_kmh, type}
     landmarks list of (label, fwd, right) in vehicle frame
-    status   mode, sim_time, frame, rtf, client_fps, map, collision, n_near
+    route    float (M, 2) upcoming route points (fwd, right) in vehicle frame
+    nav      {goal, remaining_m, eta_s, target_kmh, reason} while the pilot drives
+    status   mode, sim_time, frame, rtf, client_fps, map, collision, n_near,
+             tick_ms, render_ms
     camera_cfg  {"x", "z", "fov"} where the camera sits on the car
 """
 
@@ -68,8 +71,9 @@ C = {
     "text": (220, 226, 232), "dim": (120, 130, 142), "faint": (60, 66, 76),
     "cyan": (0, 200, 255), "green": (60, 220, 120), "amber": (255, 180, 0),
     "red": (255, 70, 70), "magenta": (230, 90, 230), "white": (245, 245, 245),
-    "ego": (40, 150, 255),
+    "ego": (40, 150, 255), "route": (80, 255, 160),
 }
+MODE_COLOURS = {"MANUAL": C["cyan"], "TM AUTOPILOT": C["amber"], "TWINDRIVE": C["green"]}
 
 # 8-corner box convention: index = sx*4 + sy*2 + sz
 BOX_EDGES = [(0, 1), (2, 3), (4, 5), (6, 7), (0, 2), (1, 3), (4, 6), (5, 7),
@@ -208,6 +212,17 @@ class Dashboard:
             tag = f"LEAD {v['dist']:.1f} m" if lead else f"{v['dist']:.0f} m"
             self._text(tag, self.f14 if lead else self.f12, col, (box.x, box.y - 16))
         self._text("FRONT CAMERA  ·  ground-truth boxes", self.f12, C["white"], (8, 6))
+        nav = s.get("nav")
+        if nav:
+            eta = nav.get("eta_s")
+            eta_txt = f"{int(eta // 60)}:{int(eta % 60):02d}" if eta is not None else "--:--"
+            txt = (f"→ {nav['goal']}   {nav['remaining_m']:.0f} m   ETA {eta_txt}   "
+                   f"target {nav['target_kmh']:.0f} km/h ({nav['reason']})")
+            surf = self.f14.render(txt, True, C["bg"])
+            pill = surf.get_rect(topright=(r.right - 12, 8)).inflate(20, 10)
+            col = C["red"] if nav["reason"] == "EMERGENCY BRAKE" else C["route"]
+            pygame.draw.rect(self.screen, col, pill, border_radius=14)
+            self.screen.blit(surf, surf.get_rect(center=pill.center))
         coll = s.get("status", {}).get("collision")
         if coll:
             bar = pygame.Rect(0, r.h - 34, r.w, 34)
@@ -226,6 +241,15 @@ class Dashboard:
             self._grid_line(surf, (gx, -40, 0), (gx, 40, 0), cam, pitch, fov)
         for gy in range(-40, 41, 10):
             self._grid_line(surf, (-10, gy, 0), (70, gy, 0), cam, pitch, fov)
+
+        route = s.get("route")
+        if route is not None and len(route) > 1:
+            pts3 = np.c_[route, np.full(len(route), 0.05)]
+            u, v, depth = project(pts3, cam, pitch, fov, r.w, r.h)
+            ok = depth > 1.0
+            for i in range(len(route) - 1):
+                if ok[i] and ok[i + 1]:
+                    pygame.draw.line(surf, C["route"], (u[i], v[i]), (u[i + 1], v[i + 1]), 4)
 
         lidar = s.get("lidar")
         n_pts = 0
@@ -307,6 +331,11 @@ class Dashboard:
         def to_px(fwd, right):
             return float(car_c + right / m), float(car_r - fwd / m)
 
+        route = s.get("route")
+        if route is not None and len(route) > 1:
+            pygame.draw.lines(surf, C["route"], False, [to_px(f, rr) for f, rr in route], 4)
+            pygame.draw.circle(surf, C["route"], [int(c) for c in to_px(*route[-1])], 6)
+
         for veh in s.get("vehicles", []):
             poly = [to_px(veh["corners"][k, 0], veh["corners"][k, 1]) for k in BOX_BOTTOM]
             lead = veh.get("lead", False)
@@ -346,8 +375,7 @@ class Dashboard:
         mode = s.get("status", {}).get("mode", "MANUAL")
         badge = pygame.Rect(0, 0, 120, 24)
         badge.topright = (r.right - 10, r.y + 6)
-        pygame.draw.rect(self.screen, C["green"] if mode == "AUTOPILOT" else C["cyan"],
-                         badge, border_radius=12)
+        pygame.draw.rect(self.screen, MODE_COLOURS.get(mode, C["cyan"]), badge, border_radius=12)
         self._text(mode, self.f12, C["bg"], badge.center, "center")
 
         # speed gauge: 270 deg arc, 0-60 km/h
@@ -366,6 +394,13 @@ class Dashboard:
             pygame.draw.line(self.screen, C["text"], p0, p1, 2)
             self._text(kmh, self.f12, C["dim"],
                        (cx + (rad - 22) * math.cos(a), cy - (rad - 22) * math.sin(a)), "center")
+        nav = s.get("nav")
+        if nav:  # target-speed marker on the dial
+            ta = math.radians(225 - min(nav["target_kmh"], vmax) / vmax * 270)
+            tip = (cx + (rad + 4) * math.cos(ta), cy - (rad + 4) * math.sin(ta))
+            b1 = (cx + (rad + 16) * math.cos(ta + 0.06), cy - (rad + 16) * math.sin(ta + 0.06))
+            b2 = (cx + (rad + 16) * math.cos(ta - 0.06), cy - (rad + 16) * math.sin(ta - 0.06))
+            pygame.draw.polygon(self.screen, C["route"], [tip, b1, b2])
         a = math.radians(225 - min(speed, vmax) / vmax * 270)
         pygame.draw.line(self.screen, C["white"], (cx, cy),
                          (cx + (rad - 14) * math.cos(a), cy - (rad - 14) * math.sin(a)), 3)
@@ -563,20 +598,25 @@ class Dashboard:
         pygame.draw.rect(self.screen, (16, 18, 22), r)
         pygame.draw.line(self.screen, C["edge"], r.topleft, r.topright)
         st = s.get("status", {})
-        left = (f"SIM {st.get('sim_time', 0):7.1f} s   |   frame {st.get('frame', 0)}   |   "
-                f"real-time factor {st.get('rtf', 0):.2f}x   |   {st.get('client_fps', 0):4.1f} FPS   |   "
-                f"map {st.get('map', '?')}")
+        left = (f"SIM {st.get('sim_time', 0):7.1f} s  |  frame {st.get('frame', 0)}  |  "
+                f"RTF {st.get('rtf', 0):.2f}x  |  {st.get('client_fps', 0):4.1f} FPS  |  "
+                f"tick+sensors {st.get('tick_ms', 0):5.0f} ms  |  "
+                f"draw {st.get('render_ms', 0):4.0f} ms  |  map {st.get('map', '?')}")
         self._text(left, self.f12, C["text"], (r.x + 10, r.centery), "midleft")
-        self._text("W/S thr/brk   A/D steer   Q reverse   SPACE handbrake   "
-                   "P autopilot   H help   ESC quit", self.f12, C["dim"],
+        self._text("T TwinDrive pilot   G next goal   P CARLA autopilot   "
+                   "W/A/S/D manual   H help   ESC quit", self.f12, C["dim"],
                    (r.right - 10, r.centery), "midright")
 
     def _help(self):
-        lines = ["CONTROLS", "", "W / UP        throttle", "S / DOWN      brake",
-                 "A / D         steer left / right", "Q             toggle reverse",
-                 "SPACE         handbrake", "P             toggle autopilot (Traffic Manager)",
+        lines = ["CONTROLS", "",
+                 "T             TwinDrive pilot on/off (drives to goal)",
+                 "G             next goal landmark (replans route)",
+                 "P             CARLA Traffic Manager autopilot on/off",
+                 "W / UP        throttle  (any drive key = take over)",
+                 "S / DOWN      brake", "A / D         steer left / right",
+                 "Q             toggle reverse", "SPACE         handbrake",
                  "H             toggle this help", "ESC           quit and clean up"]
-        box = pygame.Rect(0, 0, 420, 40 + 24 * len(lines))
+        box = pygame.Rect(0, 0, 520, 40 + 24 * len(lines))
         box.center = (WINDOW_SIZE[0] // 2, WINDOW_SIZE[1] // 2)
         overlay = pygame.Surface(box.size, pygame.SRCALPHA)
         overlay.fill((0, 0, 0, 215))
