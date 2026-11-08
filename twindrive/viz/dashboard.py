@@ -27,7 +27,7 @@ Layout (1600 x 930)
     | STATUS BAR                                         |
 
 State dict (all keys optional except "ego")
-    camera   uint8 (H, W, 3) RGB, same size as the camera panel
+    camera   uint8 (H, W, 3) RGB (scaled to the 800x450 panel if smaller)
     lidar    float32 (N, 4): x fwd, y right, z up (vehicle frame), intensity
     bev      uint8 (BEV_SIZE, BEV_SIZE, 3) local drivable map
     ego      speed_kmh, x, y, yaw, pitch, roll, length, width, height
@@ -194,7 +194,10 @@ class Dashboard:
             self._panel(r, "FRONT CAMERA")
             self._text("camera disabled", self.f16b, C["dim"], r.center, "center")
             return
-        self.screen.blit(pygame.surfarray.make_surface(cam.swapaxes(0, 1)), r.topleft)
+        surf = pygame.surfarray.make_surface(cam.swapaxes(0, 1))
+        if surf.get_size() != r.size:  # camera may run smaller than the panel
+            surf = pygame.transform.smoothscale(surf, r.size)
+        self.screen.blit(surf, r.topleft)
         cfg = s.get("camera_cfg", {"x": 1.5, "z": 1.6, "fov": 90.0})
         for v in s.get("vehicles", []):
             u, vv, depth = project(v["corners"], (cfg["x"], 0.0, cfg["z"]), 0.0,
@@ -211,7 +214,9 @@ class Dashboard:
             pygame.draw.rect(self.screen, col, box, 3 if lead else 1)
             tag = f"LEAD {v['dist']:.1f} m" if lead else f"{v['dist']:.0f} m"
             self._text(tag, self.f14 if lead else self.f12, col, (box.x, box.y - 16))
-        self._text("FRONT CAMERA  ·  ground-truth boxes", self.f12, C["white"], (8, 6))
+        hz = cfg.get("hz")
+        rate = f"{hz:g} Hz  ·  " if hz else ""
+        self._text(f"FRONT CAMERA  ·  {rate}ground-truth boxes", self.f12, C["white"], (8, 6))
         nav = s.get("nav")
         if nav:
             eta = nav.get("eta_s")

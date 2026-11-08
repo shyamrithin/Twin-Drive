@@ -35,12 +35,20 @@ Lead vehicle: the nearest vehicle ahead whose box overlaps the ego's width,
 from ground-truth positions (a straight corridor, so it can miss cars on
 tight curves). Real perception replaces this in Phase 3.
 
+Performance
+    Start CARLA with:  CarlaUE4.exe -quality-level=Low -RenderOffScreen
+    Measured on this map: one tick costs ~40 ms without the camera and ~315 ms
+    with an 800x450 camera rendered every tick (the tree foliage is expensive
+    to render; LiDAR and traffic are cheap). Defaults therefore run the
+    simulation at 10 Hz and the camera at 5 Hz, 640x360, no post-processing.
+
 Usage
 -----
-    python tools/10_drive_dashboard.py --goal tech_park           # drive itself
-    python tools/10_drive_dashboard.py --spawn tech_park --goal main_gate
-    python tools/10_drive_dashboard.py --no-camera --traffic 0    # speed test
-    python tools/10_drive_dashboard.py --scale 0.8                # small screens
+    python tools/10_drive_dashboard.py --no-follow --goal tech_park     # drive itself
+    python tools/10_drive_dashboard.py --no-follow --spawn tech_park --goal main_gate
+    python tools/10_drive_dashboard.py --no-follow --camera-hz 2        # even faster
+    python tools/10_drive_dashboard.py --no-follow --no-camera          # fastest
+    python tools/10_drive_dashboard.py --scale 0.8                      # small screens
 """
 
 import os
@@ -61,7 +69,7 @@ import pygame
 from twindrive import DEFAULT_MAP
 from twindrive.control import Pilot
 from twindrive.planning import RoutePlanner
-from twindrive.sensors import CAMERA_CFG, SensorSuite
+from twindrive.sensors import SensorSuite
 from twindrive.viz import BEV_CAR_ROW_FRAC, BEV_M_PER_PX, BEV_SIZE, WINDOW_SIZE, Dashboard
 from twindrive.world import (DrivableMap, is_routable, load_landmarks,
                              routable_lane_keys, world_to_local)
@@ -69,6 +77,8 @@ from twindrive.world import (DrivableMap, is_routable, load_landmarks,
 NEAR_M = 60.0          # vehicles closer than this are drawn and considered
 LANDMARK_VIEW_M = 120.0
 REPLAN_OFF_ROUTE_M = 10.0
+IMU_SETTLE_S = 1.0      # ignore IMU right after spawn (car drops onto the road)
+IMU_MAX_MS2 = 30.0      # ~3 g: anything above is a collision spike, not driving
 # 8 box corners, index = sx*4 + sy*2 + sz  (matches twindrive.viz.dashboard)
 CORNER_SIGNS = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)],
                         dtype=np.float64)
@@ -199,7 +209,7 @@ def box_corners_in_ego(actor, ego_inv):
     return (world_pts @ ego_inv.T)[:, :3]
 
 
-def build_state(ego, others, data, imu_f, landmarks, dm, status):
+def build_state(ego, others, data, imu_f, landmarks, dm, status, camera_cfg):
     tf = ego.get_transform()
     ex, ey, yaw = tf.location.x, tf.location.y, tf.rotation.yaw
     v = ego.get_velocity()
@@ -265,7 +275,7 @@ def build_state(ego, others, data, imu_f, landmarks, dm, status):
         "lead": lead,
         "landmarks": lms,
         "status": status,
-        "camera_cfg": CAMERA_CFG,
+        "camera_cfg": camera_cfg,
     }
 
 
@@ -281,8 +291,13 @@ def main():
     p.add_argument("--vehicle", default="vehicle.tesla.model3")
     p.add_argument("--traffic", type=int, default=30)
     p.add_argument("--bikes", type=float, default=0.35, help="fraction of traffic that is two-wheelers")
-    p.add_argument("--dt", type=float, default=0.05, help="simulation step (s)")
+    p.add_argument("--dt", type=float, default=0.1, help="simulation step (s); 0.1 = 10 Hz")
     p.add_argument("--lidar-pps", type=int, default=300000)
+    p.add_argument("--camera-res", default="640x360", help="camera image size, WxH")
+    p.add_argument("--camera-hz", type=float, default=5.0,
+                   help="camera frame rate; 0 = every tick (slow on this map)")
+    p.add_argument("--camera-post", action="store_true",
+                   help="enable camera post-processing (bloom etc.); costs GPU")
     p.add_argument("--no-camera", action="store_true")
     p.add_argument("--autopilot", action="store_true", help="start in CARLA's TM autopilot")
     p.add_argument("--no-follow", action="store_true", help="don't move the CARLA spectator")
@@ -329,7 +344,10 @@ def main():
         world.tick()
         traffic = spawn_traffic(client, world, cmap, tm, args.traffic, args.bikes,
                                 ego.get_location(), rng)
-        suite = SensorSuite(world, ego, args.dt, args.lidar_pps, camera=not args.no_camera)
+        cam_w, cam_h = (int(v) for v in args.camera_res.lower().split("x"))
+        suite = SensorSuite(world, ego, args.dt, args.lidar_pps, camera=not args.no_camera,
+                            cam_w=cam_w, cam_h=cam_h, cam_hz=args.camera_hz,
+                            cam_post=args.camera_post)
         world.tick()
         others = [a for a in world.get_actors().filter("vehicle.*") if a.id != ego.id]
         wheelbase, max_steer = vehicle_geometry(ego)
@@ -369,7 +387,7 @@ def main():
         clock = pygame.time.Clock()
         driver = KeyboardDriver()
         spectator = world.get_spectator()
-        imu_f = None
+        imu_f, t_start, last_camera = None, None, None
         walls, last_wall = [], time.time()
         frame_count, render_ms = 0, 0.0
 
@@ -428,8 +446,18 @@ def main():
             tick_ms = (time.time() - t0) * 1000.0
             sim_time = world.get_snapshot().timestamp.elapsed_seconds
 
-            if "imu" in data:  # low-pass so bumps don't make the plots jump
-                m = data["imu"]
+            if t_start is None:
+                t_start = sim_time
+            if "camera" in data:  # camera runs slower than the tick: keep the newest
+                last_camera = data["camera"]
+            data["camera"] = last_camera
+
+            # IMU: ignore the first second (the car drops onto the road at
+            # spawn, giving a fake multi-g spike) and impossible spikes from
+            # collisions; low-pass the rest so the plots stay readable
+            m = data.get("imu")
+            if m and sim_time - t_start > IMU_SETTLE_S and \
+                    abs(m["ax"]) < IMU_MAX_MS2 and abs(m["ay"]) < IMU_MAX_MS2:
                 if imu_f is None:
                     imu_f = dict(m)
                 else:
@@ -460,7 +488,7 @@ def main():
                       "rtf": args.dt / mean_wall, "client_fps": 1.0 / mean_wall,
                       "map": DEFAULT_MAP, "collision": coll,
                       "tick_ms": tick_ms, "render_ms": render_ms}
-            state = build_state(ego, others, data, imu_f, landmarks, dm, status)
+            state = build_state(ego, others, data, imu_f, landmarks, dm, status, suite.camera_cfg)
             ego_s = state["ego"]
 
             # ------------------------------------------------ decide next control

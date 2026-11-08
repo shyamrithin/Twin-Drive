@@ -7,25 +7,35 @@
 """
 Description
 -----------
-Attaches TwinDrive's sensor suite to the ego vehicle and returns
-FRAME-SYNCHRONISED data every tick.
+Attaches TwinDrive's sensor suite to the ego vehicle and returns its data
+every tick.
 
 Sensors
-    front camera   RGB 800x450, FOV 90, mounted behind the windscreen
+    front camera   RGB, default 640x360, FOV 90, default 5 Hz, post-processing
+                   OFF (see "Performance" below)
     3D LiDAR       32 channels, 60 m range, +10/-25 deg vertical FOV, one full
                    360 deg sweep per tick (rotation_frequency = 1/dt)
     IMU            accelerometer, gyroscope, compass
     collision      event sensor (only fires on impact)
 
-Why synchronous mode matters
+Synchronisation
     In synchronous mode the simulator only advances when we call
-    world.tick(). Each sensor callback pushes (frame, data) into its own
-    queue; get(frame) pops until every sensor has data for exactly that
-    frame. So camera, LiDAR and IMU always describe the same instant,
-    which is essential later when we record training data.
+    world.tick(). LiDAR and IMU produce data EVERY tick: get(frame) pops their
+    queues until both have exactly that frame, so they always describe the
+    same instant.
+    The camera runs at its own, lower rate (sensor_tick) and is NOT waited
+    for: get() returns the newest image that has arrived, which is at most
+    one camera period old. Fine for display; when we record training data
+    later, the recorder will wait for camera frames explicitly.
+
+Performance (measured on the campus map, RTX 4050 laptop)
+    tick without camera ~40 ms, with a 800x450 camera every tick ~315 ms.
+    The tree foliage makes every camera render expensive, so we render it
+    less often, smaller, and without post-processing (bloom, motion blur,
+    lens flares, which cost GPU time and add nothing for driving).
 
 Output of get(frame)
-    {"camera": uint8 (H, W, 3) RGB,
+    {"camera": uint8 (H, W, 3) RGB      (only when a new image arrived),
      "lidar":  float32 (N, 4) x fwd, y right, z up (VEHICLE frame, z ~ height
                above ground), intensity,
      "imu":    dict ax, ay, az (m/s^2), gx, gy, gz (rad/s), compass (rad)}
@@ -36,7 +46,7 @@ import queue
 import carla
 import numpy as np
 
-CAMERA_CFG = {"x": 1.5, "y": 0.0, "z": 1.6, "fov": 90.0, "w": 800, "h": 450}
+CAMERA_CFG = {"x": 1.5, "y": 0.0, "z": 1.6, "fov": 90.0, "w": 640, "h": 360, "hz": 5.0}
 LIDAR_CFG = {"x": 0.0, "y": 0.0, "z": 2.4, "channels": 32, "range": 60.0,
              "upper_fov": 10.0, "lower_fov": -25.0, "pps": 300000}
 
@@ -46,21 +56,31 @@ LIDAR_FLIP_Y = False
 
 
 class SensorSuite:
-    def __init__(self, world, vehicle, dt, lidar_pps=None, camera=True):
+    def __init__(self, world, vehicle, dt, lidar_pps=None, camera=True,
+                 cam_w=640, cam_h=360, cam_hz=5.0, cam_post=False):
         self.world = world
         self.vehicle = vehicle
         self.actors = []
-        self.queues = {}
+        self.queues = {}          # synced every tick (lidar, imu)
+        self.cam_q = None         # camera: newest-available, not waited for
         self.last_collision = None  # (sim_time, other_actor_type)
+        self.camera_cfg = dict(CAMERA_CFG, w=cam_w, h=cam_h, hz=cam_hz)
         bp_lib = world.get_blueprint_library()
 
         if camera:
             bp = bp_lib.find("sensor.camera.rgb")
-            bp.set_attribute("image_size_x", str(CAMERA_CFG["w"]))
-            bp.set_attribute("image_size_y", str(CAMERA_CFG["h"]))
+            bp.set_attribute("image_size_x", str(cam_w))
+            bp.set_attribute("image_size_y", str(cam_h))
             bp.set_attribute("fov", str(CAMERA_CFG["fov"]))
-            bp.set_attribute("sensor_tick", "0.0")  # every tick
-            self._spawn("camera", bp, CAMERA_CFG)
+            period = 1.0 / cam_hz if cam_hz > 0 else 0.0
+            bp.set_attribute("sensor_tick", str(period if period > dt else 0.0))
+            for attr, val in (("enable_postprocess_effects", str(cam_post)),
+                              ("motion_blur_intensity", "0.0"),
+                              ("bloom_intensity", "0.0"),
+                              ("lens_flare_intensity", "0.0")):
+                if bp.has_attribute(attr):
+                    bp.set_attribute(attr, val)
+            self.cam_q = self._spawn("camera", bp, CAMERA_CFG, synced=False)
 
         bp = bp_lib.find("sensor.lidar.ray_cast")
         bp.set_attribute("channels", str(LIDAR_CFG["channels"]))
@@ -83,30 +103,38 @@ class SensorSuite:
         self.actors.append(col)
 
     # ------------------------------------------------------------------ setup
-    def _spawn(self, name, bp, cfg):
+    def _spawn(self, name, bp, cfg, synced=True):
         tf = carla.Transform(carla.Location(x=cfg["x"], y=cfg["y"], z=cfg["z"]))
         actor = self.world.spawn_actor(bp, tf, attach_to=self.vehicle)
         q = queue.Queue()
         actor.listen(lambda data, q=q: q.put((data.frame, data)))
         self.actors.append(actor)
-        self.queues[name] = q
+        if synced:
+            self.queues[name] = q
+        return q
 
     def _on_collision(self, event):
         self.last_collision = (event.timestamp, event.other_actor.type_id)
 
     # ------------------------------------------------------------------ data
     def get(self, frame, timeout=2.0):
-        """Data from every synced sensor for exactly this frame."""
+        """LiDAR + IMU for exactly this frame, plus the newest camera image."""
         raw = {}
         for name, q in self.queues.items():
             while True:
                 f, data = q.get(timeout=timeout)
-                if f == frame:
+                if f >= frame:  # f > frame should not happen in sync mode
                     raw[name] = data
                     break
-                if f > frame:  # should not happen in sync mode; keep newest
-                    raw[name] = data
+        if self.cam_q is not None:
+            newest = None
+            while True:
+                try:
+                    newest = self.cam_q.get_nowait()[1]
+                except queue.Empty:
                     break
+            if newest is not None:
+                raw["camera"] = newest
         return self._convert(raw)
 
     @staticmethod
