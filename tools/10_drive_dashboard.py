@@ -46,6 +46,7 @@ Usage
 -----
     python tools/10_drive_dashboard.py --no-follow --goal tech_park     # drive itself
     python tools/10_drive_dashboard.py --no-follow --spawn tech_park --goal main_gate
+    python tools/10_drive_dashboard.py --no-follow --goal tech_park --hide-vegetation
     python tools/10_drive_dashboard.py --no-follow --camera-hz 2        # even faster
     python tools/10_drive_dashboard.py --no-follow --no-camera          # fastest
     python tools/10_drive_dashboard.py --scale 0.8                      # small screens
@@ -73,6 +74,7 @@ from twindrive.sensors import SensorSuite
 from twindrive.viz import BEV_CAR_ROW_FRAC, BEV_M_PER_PX, BEV_SIZE, WINDOW_SIZE, Dashboard
 from twindrive.world import (DrivableMap, is_routable, load_landmarks,
                              routable_lane_keys, world_to_local)
+from twindrive.world.vegetation import find_vegetation, set_visible
 
 NEAR_M = 60.0          # vehicles closer than this are drawn and considered
 LANDMARK_VIEW_M = 120.0
@@ -298,6 +300,8 @@ def main():
                    help="camera frame rate; 0 = every tick (slow on this map)")
     p.add_argument("--camera-post", action="store_true",
                    help="enable camera post-processing (bloom etc.); costs GPU")
+    p.add_argument("--hide-vegetation", action="store_true",
+                   help="hide the campus trees while running (big speed-up); restored on exit")
     p.add_argument("--no-camera", action="store_true")
     p.add_argument("--autopilot", action="store_true", help="start in CARLA's TM autopilot")
     p.add_argument("--no-follow", action="store_true", help="don't move the CARLA spectator")
@@ -327,8 +331,12 @@ def main():
 
     original = world.get_settings()
     tm = client.get_trafficmanager(args.tm_port)
-    ego, suite, traffic = None, None, []
+    ego, suite, traffic, hidden = None, None, [], []
     try:
+        if args.hide_vegetation:
+            hidden = find_vegetation(world)
+            n = set_visible(world, hidden, False)
+            print(f"Vegetation: {n} objects hidden (restored on exit)")
         # ---------------------------------------------------- synchronous mode
         settings = world.get_settings()
         settings.synchronous_mode = True
@@ -540,6 +548,9 @@ def main():
             client.apply_batch_sync([carla.command.DestroyActor(i) for i in ids], True)
         tm.set_synchronous_mode(False)
         world.apply_settings(original)
+        if hidden:
+            set_visible(world, hidden, True)
+            print("Vegetation restored.")
         pygame.quit()
         print("Done: actors destroyed, simulator back in asynchronous mode.")
 
