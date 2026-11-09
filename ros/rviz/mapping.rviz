@@ -1,0 +1,104 @@
+# TwinDrive — RViz2 layout for SLAM mapping (map, scan, 3D points, route, camera)
+# Run: rviz2 -d ros/rviz/mapping.rviz --ros-args -p use_sim_time:=true
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 10
+      Plane Cell Count: 40
+      Reference Frame: <Fixed Frame>
+      Color: 60; 60; 70
+    - Class: rviz_default_plugins/Map
+      Name: SLAM map
+      Enabled: true
+      Topic:
+        Value: /map
+        Depth: 1
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        History Policy: Keep Last
+      Color Scheme: map
+      Alpha: 0.8
+      Draw Behind: true
+    - Class: rviz_default_plugins/LaserScan
+      Name: 2D scan
+      Enabled: true
+      Topic:
+        Value: /scan
+        Depth: 5
+        Reliability Policy: Reliable
+        History Policy: Keep Last
+      Size (m): 0.15
+      Style: Points
+      Color Transformer: FlatColor
+      Color: 255; 60; 60
+    - Class: rviz_default_plugins/PointCloud2
+      Name: 3D LiDAR
+      Enabled: true
+      Topic:
+        Value: /points
+        Depth: 5
+        Reliability Policy: Best Effort
+        History Policy: Keep Last
+      Style: Points
+      Size (Pixels): 2
+      Color Transformer: AxisColor
+      Axis: Z
+      Decay Time: 0
+    - Class: rviz_default_plugins/Path
+      Name: TwinDrive route
+      Enabled: true
+      Topic:
+        Value: /twindrive/route
+        Depth: 1
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        History Policy: Keep Last
+      Color: 80; 255; 160
+      Line Style: Billboards
+      Line Width: 0.4
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Show Names: true
+      Show Axes: true
+      Marker Scale: 4
+    - Class: rviz_default_plugins/Image
+      Name: Front camera
+      Enabled: true
+      Topic:
+        Value: /camera/image
+        Depth: 1
+        Reliability Policy: Best Effort
+        History Policy: Keep Last
+  Global Options:
+    Fixed Frame: map
+    Background Color: 18; 20; 24
+    Frame Rate: 30
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Measure
+    - Class: rviz_default_plugins/SetGoal
+      Topic:
+        Value: /goal_pose
+    - Class: rviz_default_plugins/PublishPoint
+      Topic:
+        Value: /clicked_point
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Top down
+      Target Frame: base_link
+      Scale: 6
+    Saved: ~
+Window Geometry:
+  Width: 1500
+  Height: 900
