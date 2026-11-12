@@ -47,6 +47,7 @@ Usage
     python tools/10_drive_dashboard.py --no-follow --goal tech_park     # drive itself
     python tools/10_drive_dashboard.py --no-follow --spawn tech_park --goal main_gate
     python tools/10_drive_dashboard.py --no-follow --goal tech_park --hide-vegetation
+    python tools/10_drive_dashboard.py --no-follow --goal tech_park --paused   # wait for T
     python tools/10_drive_dashboard.py --no-follow --camera-hz 2        # even faster
     python tools/10_drive_dashboard.py --no-follow --no-camera          # fastest
     python tools/10_drive_dashboard.py --scale 0.8                      # small screens
@@ -302,6 +303,8 @@ def main():
                    help="enable camera post-processing (bloom etc.); costs GPU")
     p.add_argument("--hide-vegetation", action="store_true",
                    help="hide the campus trees while running (big speed-up); restored on exit")
+    p.add_argument("--paused", action="store_true",
+                   help="with --goal: plan the route but wait (handbrake on) until you press T")
     p.add_argument("--no-camera", action="store_true")
     p.add_argument("--autopilot", action="store_true", help="start in CARLA's TM autopilot")
     p.add_argument("--no-follow", action="store_true", help="don't move the CARLA spectator")
@@ -379,7 +382,9 @@ def main():
         mode = "MANUAL"
         if args.goal:
             plan_to(args.goal)
-            mode = "TWINDRIVE"
+            mode = "MANUAL" if args.paused else "TWINDRIVE"
+            if args.paused:
+                print("Paused: press T in the dashboard to start driving.")
         elif args.autopilot:
             mode = "TM AUTOPILOT"
             ego.set_autopilot(True, args.tm_port)
@@ -394,6 +399,7 @@ def main():
         dash = Dashboard(canvas)
         clock = pygame.time.Clock()
         driver = KeyboardDriver()
+        driver.parked = bool(args.goal and args.paused)  # hold at the start
         spectator = world.get_spectator()
         imu_f, t_start, last_camera = None, None, None
         walls, last_wall = [], time.time()

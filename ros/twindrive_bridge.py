@@ -32,6 +32,9 @@ Subscribes
 Modes
     pilot     TwinDrive pilot drives: to clicked goals, or along --tour
     cmd_vel   an external ROS controller (Nav2) drives via /cmd_vel
+    --attach  publish only: the pygame dashboard (tools/10_drive_dashboard.py)
+              owns the simulation and drives; the bridge finds its car
+              (role_name 'hero'), adds its own LiDAR/IMU and follows its ticks
 
 Coordinate frames (the important part)
     CARLA is LEFT-handed: x forward, y RIGHT, z up, yaw clockwise.
@@ -52,6 +55,7 @@ Usage (conda deactivated, ROS sourced)
     python3 ros/twindrive_bridge.py --tour all --hide-vegetation        # map campus
     python3 ros/twindrive_bridge.py --hide-vegetation                   # click goals
     python3 ros/twindrive_bridge.py --mode cmd_vel --hide-vegetation    # for Nav2
+    python3 ros/twindrive_bridge.py --attach --no-camera --goal tech_park  # alongside the dashboard
 """
 
 import argparse
@@ -284,6 +288,69 @@ class Bridge(Node):
         self.pub_route.publish(p)
 
 
+# ============================================================================ attach mode
+def run_attach(args, world, node, planner, landmarks):
+    """Publish ROS topics for a car that ANOTHER client drives (the dashboard).
+
+    Spawns nothing, never ticks the world and never applies control: it waits
+    for the dashboard's car (role_name 'hero'), attaches its own LiDAR/IMU to
+    it, and follows the dashboard's ticks with world.wait_for_tick().
+    """
+    import time
+    log = node.get_logger()
+    log.info("Attach mode: waiting for the dashboard's car (role_name = hero) ...")
+    ego = None
+    for _ in range(240):  # up to ~2 minutes
+        for a in world.get_actors().filter("vehicle.*"):
+            if a.attributes.get("role_name") == "hero":
+                ego = a
+                break
+        if ego:
+            break
+        time.sleep(0.5)
+    if ego is None:
+        raise SystemExit("No car with role_name 'hero' found. Start the dashboard first.")
+    dt = world.get_settings().fixed_delta_seconds or 0.1
+    log.info(f"Attached to {ego.type_id} (id {ego.id}), dt = {dt:.2f} s")
+    suite = SensorSuite(world, ego, dt, camera=not args.no_camera,
+                        cam_w=640, cam_h=360, cam_hz=args.camera_hz)
+    if args.goal:  # same planner, same start -> same route the dashboard will drive
+        lm = landmarks[args.goal]
+        route = planner.plan(ego.get_location(), carla.Location(lm["x"], lm["y"], lm["z"]))
+        node.publish_route(route, stamp(world.get_snapshot().timestamp.elapsed_seconds))
+        log.info(f"Route to {lm['label']} published on /twindrive/route ({len(route)} points)")
+    first = True
+    try:
+        while rclpy.ok():
+            snap = world.wait_for_tick(10.0)
+            if not ego.is_alive:
+                log.info("Car is gone (dashboard closed). Stopping.")
+                break
+            try:
+                data = suite.get(snap.frame, timeout=2.0)
+            except queue.Empty:
+                continue
+            node.sim_t = snap.timestamp.elapsed_seconds
+            t = stamp(node.sim_t)
+            node.pub_clock.publish(Clock(clock=t))
+            if first:
+                node.publish_static(t)
+                first = False
+            node.publish_state(ego, data, t, dt)
+            rclpy.spin_once(node, timeout_sec=0.0)
+    except KeyboardInterrupt:
+        pass
+    except RuntimeError as e:  # wait_for_tick timeout: simulator stopped ticking
+        log.warn(f"Stopped: {e}")
+    finally:
+        print("Cleaning up (attach mode: only our own sensors) ...")
+        suite.destroy()
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+        print("Done.")
+
+
 # ============================================================================ main
 def main():
     ap = argparse.ArgumentParser(description="TwinDrive CARLA <-> ROS 2 bridge")
@@ -302,6 +369,9 @@ def main():
     ap.add_argument("--odom-noise", type=float, default=0.0,
                     help="odometry drift per metre travelled (e.g. 0.02); 0 = perfect")
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--attach", action="store_true",
+                    help="don't spawn or tick: publish topics for the dashboard's car")
+    ap.add_argument("--goal", default="", help="attach mode: landmark whose route to show in RViz")
     args = ap.parse_args()
     rng = random.Random(args.seed)
 
@@ -314,6 +384,8 @@ def main():
     landmarks = load_landmarks(Path(__file__).resolve().parents[1] / f"config/landmarks_{DEFAULT_MAP}.json")
     if args.spawn not in landmarks:
         raise SystemExit(f"Unknown spawn '{args.spawn}'")
+    if args.goal and args.goal not in landmarks:
+        raise SystemExit(f"Unknown goal '{args.goal}'")
     tour = [n for n in landmarks if n != args.spawn] if args.tour == "all" else \
         [n.strip() for n in args.tour.split(",") if n.strip()]
     for n in tour:
@@ -325,6 +397,9 @@ def main():
     log = node.get_logger()
     log.info("Building route planner ...")
     planner = RoutePlanner(cmap)
+    if args.attach:
+        run_attach(args, world, node, planner, landmarks)
+        return
 
     original = world.get_settings()
     tm = client.get_trafficmanager(args.tm_port)
